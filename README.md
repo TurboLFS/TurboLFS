@@ -56,3 +56,8 @@ yarn
 npx -y esbuild --bundle --minify --target=node16 --platform=node --outfile=turbolfs_dist.js ./src/index.js
 ./sea.bat
 ```
+
+## Curious about TurboLFS or my other projects?
+You're welcome to join my personal Discord server for casual discussion around programming and other interests.
+
+Join here: https://discord.gg/puYeyYfvQG
