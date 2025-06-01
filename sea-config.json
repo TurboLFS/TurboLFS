@@ -1,0 +1,8 @@
+{
+  "main": "./turbolfs_dist.js",
+  "output": "sea-prep.blob",
+  "disableExperimentalSEAWarning": true,
+  "useCodeCache": true,
+  "assets": {
+  }
+}
