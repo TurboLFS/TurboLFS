@@ -20,7 +20,7 @@ Features planned for future releases:
 
 ## Installation
 
-1. Download a pre-built binary from the [Releases](#) page.
+1. Download a pre-built binary from the [Releases](https://github.com/TurboLFS/TurboLFS/releases) page.
 2. (Optional) Add the executable to your system `PATH` for global access.
 
 ---
