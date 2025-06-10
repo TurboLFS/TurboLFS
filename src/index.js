@@ -77,15 +77,11 @@ async function gitMain(argv) {
 
     const gitPath = process.env.TURBOLFS_GIT_PATH || 'git';
 
-    console.error("!!!!!! gitArgs", gitArgs);
-
     // GitHub Actions does "lfs install --local", intercepting that
 
     const isInGitRepo = fs.existsSync('.git');
 
     if (gitArgs[0] === 'lfs' && isInGitRepo) {
-        console.error('!!!!!!!!!!!!! Detected git lfs command, configuring custom transfer agent...');
-
         const commandsToRun = [
             ['config', 'set', '--local', 'lfs.customtransfer.mybatcher.path', exe],
             ['config', 'set', '--local', 'lfs.customtransfer.mybatcher.args', `turbo client "--url=${urlOption}"`],
@@ -97,8 +93,6 @@ async function gitMain(argv) {
 
         for (const command of commandsToRun) {
             const gitConfigArgs = [...command];
-
-            console.error('!!!!!!! Running git config:', gitConfigArgs.join(' '));
 
             const gitConfig = spawn(gitPath, gitConfigArgs, {
                 stdio: 'inherit'
