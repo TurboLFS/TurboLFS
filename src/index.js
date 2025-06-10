@@ -1,5 +1,5 @@
 const { spawn } = require('child_process');
-const os = require('os');
+const fs = require('fs');
 const aggregator = require('./aggregator');
 const agent = require('./agent');
 
@@ -64,8 +64,63 @@ function turboMain(options, positional) {
     }
 }
 
-function gitMain(argv) {
+async function gitMain(argv) {
     let gitArgs = argv.slice(2); // Everything after `node src/index.js`
+
+    // TODO: support node/bun instead of compiled single binary
+    // const exe = os.platform() === 'win32' ? 'turbolfs.exe' : 'turbolfs';
+    //const exe = "/Users/leonidpospelov/projects/lfs-experiment/turbolfs"; // todo
+    // let exe = "node";
+    let exe = process.argv[0];
+
+    const urlOption = "ws://localhost:3000"; // TODO
+
+    const gitPath = process.env.TURBOLFS_GIT_PATH || 'git';
+
+    console.error("!!!!!! gitArgs", gitArgs);
+
+    // GitHub Actions does "lfs install --local", intercepting that
+
+    const isInGitRepo = fs.existsSync('.git');
+
+    if (gitArgs[0] === 'lfs' && isInGitRepo) {
+        console.error('!!!!!!!!!!!!! Detected git lfs command, configuring custom transfer agent...');
+
+        const commandsToRun = [
+            ['config', 'set', '--local', 'lfs.customtransfer.mybatcher.path', exe],
+            ['config', 'set', '--local', 'lfs.customtransfer.mybatcher.args', `turbo client "--url=${urlOption}"`],
+            ['config', 'set', '--local', 'lfs.customtransfer.mybatcher.concurrent', 'true'],
+            ['config', 'set', '--local', 'lfs.customtransfer.mybatcher.concurrenttransfers', '8'],
+            ['config', 'set', '--local', 'lfs.customtransfer.mybatcher.direction', 'download'],
+            ['config', 'set', '--local', 'lfs.standalonetransferagent', 'mybatcher'],
+        ];
+
+        for (const command of commandsToRun) {
+            const gitConfigArgs = [...command];
+
+            console.error('!!!!!!! Running git config:', gitConfigArgs.join(' '));
+
+            const gitConfig = spawn(gitPath, gitConfigArgs, {
+                stdio: 'inherit'
+            });
+
+            await new Promise((resolve, reject) => {
+                gitConfig.on('exit', code => {
+                    if (code !== 0) {
+                        console.error('Failed to run git config:', code);
+                        reject(new Error(`git config exited with code ${code}`));
+                    } else {
+                        resolve();
+                    }
+                });
+
+                gitConfig.on('error', err => {
+                    console.error('Failed to run git config:', err.message);
+                    reject(err);
+                });
+            });
+        }
+    }
 
     if (gitArgs[0] === 'clone') {
         const cloneUrlIndex = gitArgs.findIndex(arg => /^https?:\/\//.test(arg));
@@ -74,17 +129,8 @@ function gitMain(argv) {
             process.exit(1);
         }
 
-        // TODO: support node/bun instead of compiled single binary
-        // const exe = os.platform() === 'win32' ? 'turbolfs.exe' : 'turbolfs';
-        //const exe = "/Users/leonidpospelov/projects/lfs-experiment/turbolfs"; // todo
-        // let exe = "node";
-        let exe = process.argv[0];
-
-        const urlOption = "ws://localhost:3000"; // TODO
-
         const configArgs = [
             '--config', `lfs.customtransfer.mybatcher.path=${exe}`,
-            // '--config', `lfs.customtransfer.mybatcher.args=turbo client "--url=${urlOption}"`,
             '--config', `lfs.customtransfer.mybatcher.args=turbo client "--url=${urlOption}"`,
             '--config', 'lfs.customtransfer.mybatcher.concurrent=true',
             '--config', 'lfs.customtransfer.mybatcher.concurrenttransfers=8',
@@ -101,8 +147,6 @@ function gitMain(argv) {
 
         console.log('Running: git', gitArgs.join(' '));
     }
-
-    const gitPath = process.env.TURBOLFS_GIT_PATH || 'git';
 
     const git = spawn(gitPath, gitArgs, {
         stdio: 'inherit'
