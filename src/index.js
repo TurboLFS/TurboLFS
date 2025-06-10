@@ -102,7 +102,9 @@ function gitMain(argv) {
         console.log('Running: git', gitArgs.join(' '));
     }
 
-    const git = spawn('git', gitArgs, {
+    const gitPath = process.env.TURBOLFS_GIT_PATH || 'git';
+
+    const git = spawn(gitPath, gitArgs, {
         stdio: 'inherit'
     });
 
