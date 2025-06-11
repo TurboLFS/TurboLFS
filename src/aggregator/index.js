@@ -90,6 +90,10 @@ async function getLfsFileStreamByOid(repoFullName, lfsOid, lfsSize, token) {
         'Content-Type': 'application/json',
     };
 
+    if (token === "PUBLIC") {
+        delete lfsApiHeaders.Authorization; // If token is "PUBLIC", do not send Authorization header
+    }
+
     let response = await fetch(lfsBatchUrl, {
         method: 'POST',
         headers: lfsApiHeaders,

@@ -53,6 +53,7 @@ function turboMain(options, positional) {
         }
         if (objectsRepo && !objectRepoToken) {
             console.error('Error: --object-repo-token is required when --objects-repo is specified.');
+            console.error('Tip: use --object-repo-token=PUBLIC for public repositories.');
             return process.exit(1);
         }
 
@@ -71,7 +72,19 @@ async function gitMain(argv) {
     // const exe = os.platform() === 'win32' ? 'turbolfs.exe' : 'turbolfs';
     //const exe = "/Users/leonidpospelov/projects/lfs-experiment/turbolfs"; // todo
     // let exe = "node";
-    let exe = process.argv[0];
+    let exe = '';
+    let argsPrefix = '';
+
+    const isSingleExecutable = process.argv[0] === process.argv[1];
+    if (isSingleExecutable) {
+        exe = process.argv[1];
+    } else {
+        exe = process.argv[0];
+        argsPrefix = process.argv[1] + ' ';
+
+        // to unix path, even on Windows
+        argsPrefix = argsPrefix.replace(/\\/g, '/');
+    }
 
     const urlOption = "ws://localhost:3000"; // TODO
 
@@ -84,7 +97,7 @@ async function gitMain(argv) {
     if (gitArgs[0] === 'lfs' && isInGitRepo) {
         const commandsToRun = [
             ['config', 'set', '--local', 'lfs.customtransfer.mybatcher.path', exe],
-            ['config', 'set', '--local', 'lfs.customtransfer.mybatcher.args', `turbo client "--url=${urlOption}"`],
+            ['config', 'set', '--local', 'lfs.customtransfer.mybatcher.args', `${argsPrefix}turbo client "--url=${urlOption}"`],
             ['config', 'set', '--local', 'lfs.customtransfer.mybatcher.concurrent', 'true'],
             ['config', 'set', '--local', 'lfs.customtransfer.mybatcher.concurrenttransfers', '8'],
             ['config', 'set', '--local', 'lfs.customtransfer.mybatcher.direction', 'download'],
@@ -125,7 +138,7 @@ async function gitMain(argv) {
 
         const configArgs = [
             '--config', `lfs.customtransfer.mybatcher.path=${exe}`,
-            '--config', `lfs.customtransfer.mybatcher.args=turbo client "--url=${urlOption}"`,
+            '--config', `lfs.customtransfer.mybatcher.args=${argsPrefix}turbo client "--url=${urlOption}"`,
             '--config', 'lfs.customtransfer.mybatcher.concurrent=true',
             '--config', 'lfs.customtransfer.mybatcher.concurrenttransfers=8',
             '--config', 'lfs.customtransfer.mybatcher.direction=download',
