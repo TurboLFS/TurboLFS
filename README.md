@@ -61,3 +61,9 @@ npx -y esbuild --bundle --minify --target=node16 --platform=node --outfile=turbo
 You're welcome to join my personal Discord server for casual discussion around programming and other interests.
 
 Join here: https://discord.gg/puYeyYfvQG
+
+## 🙌 Contributing
+
+We welcome contributions of all kinds — from fixing bugs and improving documentation to developing new features.
+
+To get started, check out our [Contributing Guide](CONTRIBUTING.md).
