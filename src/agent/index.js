@@ -85,9 +85,18 @@ async function main(backendUrlArg) {
 }
 
 async function createTempDirectory() {
+    // We use a temporary directory inside the .git directory, not the system temp directory,
+    // to prevent cross-device issues when Git LFS will move files.
     try {
-        const parentTmpDir = os.tmpdir();
-        const res = await fs.mkdtemp(path.join(parentTmpDir, `turbolfs-agent-workdir-`));
+        const gitDir = path.join(process.cwd(), '.git');
+        const gitExists = await fs.access(gitDir).then(() => true).catch(() => false);
+        if (!gitExists) {
+            throw new Error(`.git directory not found in current working directory: ${process.cwd()}`);
+        }
+
+        const parentTmpDir = path.join(gitDir, 'turbolfs');
+        await fs.mkdir(parentTmpDir, { recursive: true }); // recursive to prevent throw if directory exists
+        const res = await fs.mkdtemp(path.join(parentTmpDir, `tmp-`));
         log(`Created temporary directory: ${res}`);
         return res;
     } catch (err) {
