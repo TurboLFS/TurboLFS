@@ -3,6 +3,18 @@ const fsPromises = require('fs/promises');
 const fs = require('fs');
 const path = require('path');
 const { Readable } = require('stream');
+const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
+
+// --- FS Cache Promotion Vars ---
+let fileWriteStream;
+let tempCachePath;
+let finalCachePath;
+let isCachingAttempted;
+
+// --- S3 Cache Promotion Vars ---
+let s3WriteStream; // This will be a PassThrough stream
+let s3UploadPromise; // The promise returned by the S3 Upload utility
+let isS3CachingAttempted;
 
 let CACHE_SOURCES;
 const SUPPORTED_PROTOCOL_VERSION_BY_SERVER = 1;
@@ -47,6 +59,147 @@ const secureResolvePath = (base, oid, structured) => {
     }
     return normalized;
 };
+
+async function resetFsCachePromotion(streamDetails, oidHex) {
+    fileWriteStream = null;
+    tempCachePath = null;
+    finalCachePath = null;
+    isCachingAttempted = false;
+
+    // Condition: We are streaming from HTTP and a local file cache exists.
+    const localCacheSource = CACHE_SOURCES.find(s => s.url.startsWith('file://'));
+    if (streamDetails.sourceType === 'http' && localCacheSource) {
+        isCachingAttempted = true;
+        const localBasePath = localCacheSource.url.slice(7);
+        try {
+            finalCachePath = secureResolvePath(localBasePath, oidHex, localCacheSource.structuredPath);
+            // Use a temporary file to ensure atomic write. Suffix with PID for multi-process safety.
+            tempCachePath = `${finalCachePath}.${process.pid}.tmp`;
+
+            // Ensure the target directory exists (e.g., /path/to/cache/aa/bb/)
+            await fsPromises.mkdir(path.dirname(finalCachePath), { recursive: true });
+
+            fileWriteStream = fs.createWriteStream(tempCachePath);
+            log(`[Cache] Staging OID ${oidHex} to temporary file: ${tempCachePath}`);
+
+            // Handle write errors gracefully without stopping the client stream
+            fileWriteStream.on('error', (err) => {
+                log(`[Cache] ERROR writing OID ${oidHex} to ${tempCachePath}: ${err.message}. Aborting cache write, but continuing client stream.`);
+                if (fileWriteStream) {
+                    fileWriteStream.destroy();
+                    fileWriteStream = null; // Prevent further writes
+                    // Clean up the failed temporary file
+                    fs.unlink(tempCachePath, (unlinkErr) => {
+                        if (unlinkErr) log(`[Cache] ERROR cleaning up failed temp file ${tempCachePath}: ${unlinkErr.message}`);
+                    });
+                }
+            });
+
+        } catch (cacheSetupErr) {
+            log(`[Cache] ERROR setting up cache for OID ${oidHex}: ${cacheSetupErr.message}. Client stream will continue without caching.`);
+            fileWriteStream = null; // Ensure we don't try to use it
+        }
+    }
+}
+
+async function promoteFsCacheIfNeeded(chunk) {
+    if (fileWriteStream) {
+        if (!fileWriteStream.write(chunk)) {
+            // Handle backpressure from the filesystem if necessary
+            await new Promise(resolve => fileWriteStream.once('drain', resolve));
+        }
+    }
+}
+
+async function commitFsCacheIfNeeded(oidHex) {
+    if (fileWriteStream) {
+        await new Promise((resolve, reject) => {
+            fileWriteStream.on('finish', resolve);
+            fileWriteStream.on('error', reject); // Catch any final errors
+            fileWriteStream.end();
+        });
+        await fsPromises.rename(tempCachePath, finalCachePath);
+        log(`[Cache] Successfully promoted OID ${oidHex} to local cache: ${finalCachePath}`);
+        tempCachePath = null; // Prevent cleanup from deleting the committed file
+    }
+}
+
+async function resetS3CachePromotion(streamDetails, oidHex) {
+    s3WriteStream = null;
+    s3UploadPromise = null;
+    isS3CachingAttempted = false;
+
+    // Condition: We are NOT streaming from S3 and an S3 cache destination exists.
+    const s3CacheSource = CACHE_SOURCES.find(s => s.s3);
+    if (streamDetails.sourceType !== 's3' && s3CacheSource) {
+        isS3CachingAttempted = true;
+        log(`[Cache] OID ${oidHex} is eligible for S3 cache promotion.`);
+
+        try {
+            const s3Client = new S3Client({
+                region: s3CacheSource.s3.region,
+                endpoint: s3CacheSource.url,
+                credentials: {
+                    accessKeyId: s3CacheSource.s3.accessKeyId,
+                    secretAccessKey: s3CacheSource.s3.secretAccessKey,
+                },
+                forcePathStyle: !!s3CacheSource.url,
+            });
+
+            // The key for the object in the S3 bucket
+            const s3Key = secureResolvePath(s3CacheSource.s3.prefix || '', oidHex, s3CacheSource.structuredPath);
+
+            // Create a PassThrough stream to pipe the data into the S3 upload
+            s3WriteStream = new PassThrough();
+
+            const upload = new Upload({
+                client: s3Client,
+                params: {
+                    Bucket: s3CacheSource.s3.bucket,
+                    Key: s3Key,
+                    Body: s3WriteStream,
+                },
+            });
+
+            log(`[Cache] Staging S3 upload for OID ${oidHex} to s3://${s3CacheSource.s3.bucket}/${s3Key}`);
+            s3UploadPromise = upload.done();
+
+            // Handle errors on the upload promise for early detection and logging
+            s3UploadPromise.catch(err => {
+                log(`[Cache] ERROR during S3 upload for OID ${oidHex}: ${err.message}. Aborting S3 cache write.`);
+                if (s3WriteStream && !s3WriteStream.destroyed) {
+                    s3WriteStream.destroy(err);
+                }
+                s3WriteStream = null; // Prevent further writes
+            });
+
+        } catch (cacheSetupErr) {
+            log(`[Cache] ERROR setting up S3 cache for OID ${oidHex}: ${cacheSetupErr.message}. Client stream will continue without S3 caching.`);
+            s3WriteStream = null; // Ensure we don't try to use it
+            s3UploadPromise = null;
+        }
+    }
+}
+
+async function promoteS3CacheIfNeeded(chunk) {
+    if (s3WriteStream && !s3WriteStream.destroyed) {
+        if (!s3WriteStream.write(chunk)) {
+            // Handle backpressure from the S3 upload stream
+            await new Promise(resolve => s3WriteStream.once('drain', resolve));
+        }
+    }
+}
+
+async function commitS3CacheIfNeeded(oidHex) {
+    if (s3UploadPromise) {
+        if (s3WriteStream && !s3WriteStream.destroyed) {
+            s3WriteStream.end(); // Signal the end of the stream
+        }
+        await s3UploadPromise;
+        log(`[Cache] Successfully promoted OID ${oidHex} to S3 cache.`);
+    }
+}
+
 /**
  * Retrieves a Git LFS file's content as a Stream from a GitHub repository
  * using its OID (SHA256 hash) and size.
@@ -165,7 +318,44 @@ async function fetchStreamAndSizeFromSources(filenameOid, sizeBigint) {
                 const stream = fs.createReadStream(localPath);
                 log(`Successfully opened local file stream for OID ${filenameOid}: ${localPath}, Size: ${stats.size}`);
                 return { stream, size: BigInt(stats.size), filename: filenameOid, sourceType: 'file' };
+            } else if (source.s3) {
+                log(`Attempting to fetch LFS object ${filenameOid} from S3 source: ${source.s3.bucket}`);
 
+                const s3Client = new S3Client({
+                    region: source.s3.region, // A region may be required depending on S3 provider
+                    endpoint: source.url, // Use the top-level URL from config as the endpoint
+                    credentials: {
+                        accessKeyId: source.s3.accessKeyId,
+                        secretAccessKey: source.s3.secretAccessKey,
+                    },
+                    forcePathStyle: !!source.url, // Required for most S3-compatible services
+                });
+
+                const s3Key = secureResolvePath(source.s3.prefix || '', filenameOid, structured);
+
+                const getObjectParams = {
+                    Bucket: source.s3.bucket,
+                    Key: s3Key,
+                };
+
+                try {
+                    const response = await s3Client.send(new GetObjectCommand(getObjectParams));
+                    log(`Successfully fetched S3 object for OID ${filenameOid}. Key: ${s3Key}, Size: ${response.ContentLength}`);
+
+                    return {
+                        stream: response.Body,
+                        size: BigInt(response.ContentLength),
+                        filename: filenameOid,
+                        sourceType: 's3'
+                    };
+                } catch (s3Error) {
+                    if (s3Error.name === 'NoSuchKey') {
+                        log(`S3 object not found for OID ${filenameOid} at key: ${s3Key}`);
+                    } else {
+                        throw s3Error;
+                    }
+                    continue;
+                }
             } else if (baseUrl.startsWith('https://') || baseUrl.startsWith('http://')) {
 
                 log(`!!! Attempting to fetch LFS object ${filenameOid} from HTTP source: ${baseUrl}`);
@@ -284,59 +474,18 @@ async function handleClientConnection(ws, req) {
 
             let totalBytesStreamed = BigInt(0);
 
-            // --- Cache Promotion Setup ---
-            let fileWriteStream = null;
-            let tempCachePath = null;
-            let finalCachePath = null;
-            let isCachingAttempted = false;
-
-            // Condition: We are streaming from HTTP and a local file cache exists.
-            const localCacheSource = CACHE_SOURCES.find(s => s.url.startsWith('file://'));
-            if (streamDetails.sourceType === 'http' && localCacheSource) {
-                isCachingAttempted = true;
-                const localBasePath = localCacheSource.url.slice(7);
-                try {
-                    finalCachePath = secureResolvePath(localBasePath, oidHex, localCacheSource.structuredPath);
-                    // Use a temporary file to ensure atomic write. Suffix with PID for multi-process safety.
-                    tempCachePath = `${finalCachePath}.${process.pid}.tmp`;
-
-                    // Ensure the target directory exists (e.g., /path/to/cache/aa/bb/)
-                    await fsPromises.mkdir(path.dirname(finalCachePath), { recursive: true });
-
-                    fileWriteStream = fs.createWriteStream(tempCachePath);
-                    log(`[Cache] Staging OID ${oidHex} to temporary file: ${tempCachePath}`);
-
-                    // Handle write errors gracefully without stopping the client stream
-                    fileWriteStream.on('error', (err) => {
-                        log(`[Cache] ERROR writing OID ${oidHex} to ${tempCachePath}: ${err.message}. Aborting cache write, but continuing client stream.`);
-                        if (fileWriteStream) {
-                            fileWriteStream.destroy();
-                            fileWriteStream = null; // Prevent further writes
-                            // Clean up the failed temporary file
-                            fs.unlink(tempCachePath, (unlinkErr) => {
-                                if (unlinkErr) log(`[Cache] ERROR cleaning up failed temp file ${tempCachePath}: ${unlinkErr.message}`);
-                            });
-                        }
-                    });
-
-                } catch (cacheSetupErr) {
-                    log(`[Cache] ERROR setting up cache for OID ${oidHex}: ${cacheSetupErr.message}. Client stream will continue without caching.`);
-                    fileWriteStream = null; // Ensure we don't try to use it
-                }
-            }
-            // --- End Cache Promotion Setup ---
+            await resetFsCachePromotion(streamDetails, oidHex);
+            await resetS3CachePromotion(streamDetails, oidHex);
 
             try {
                 for await (const chunk of nodeStream) {
-                    // 1. Promote to local cache if setup was successful
-                    if (fileWriteStream) {
-                        if (!fileWriteStream.write(chunk)) {
-                            // Handle backpressure from the filesystem if necessary
-                            await new Promise(resolve => fileWriteStream.once('drain', resolve));
-                        }
-                    }
+                    // Promote if needed
+                    await Promise.all([
+                        promoteFsCacheIfNeeded(chunk),
+                        promoteS3CacheIfNeeded(chunk)
+                    ]);
 
-                    // 2. Send chunk to the connected client via WebSocket
+                    // Send chunk to client
                     if (ws.readyState !== WebSocket.OPEN) {
                         log(`WebSocket connection for ${clientAddress} closed while streaming OID ${oidHex}. Aborting.`);
                         if (typeof nodeStream.destroy === 'function') nodeStream.destroy();
@@ -365,18 +514,15 @@ async function handleClientConnection(ws, req) {
                     }
                 } else {
                     log(`Finished streaming OID ${oidHex} (${totalBytesStreamed} bytes) to ${clientAddress}`);
-                    // --- Commit Cache ---
-                    if (fileWriteStream) {
-                        await new Promise((resolve, reject) => {
-                            fileWriteStream.on('finish', resolve);
-                            fileWriteStream.on('error', reject); // Catch any final errors
-                            fileWriteStream.end();
-                        });
-                        await fsPromises.rename(tempCachePath, finalCachePath);
-                        log(`[Cache] Successfully promoted OID ${oidHex} to local cache: ${finalCachePath}`);
-                        tempCachePath = null; // Prevent cleanup from deleting the committed file
+
+                    try {
+                        await Promise.all([
+                            commitFsCacheIfNeeded(oidHex),
+                            commitS3CacheIfNeeded(oidHex),
+                        ]);
+                    } catch (cacheErr) {
+                        log(`[Cache] ERROR during final cache promotion for OID ${oidHex}: ${cacheErr.message}`);
                     }
-                    // --- End Commit Cache ---
                 }
 
             } catch (streamErr) {
@@ -424,7 +570,16 @@ async function handleClientConnection(ws, req) {
 }
 
 
-function mainServer(portArg, objectsDirArg, objectsRepoArg, objectRepoTokenArg) {
+function mainServer(
+    portArg,
+    objectsDirArg,
+    objectsRepoArg,
+    objectRepoTokenArg,
+    s3EndpointArg,
+    s3AccessKeyArg,
+    s3SecretKeyArg,
+    s3BucketArg
+) {
     CACHE_SOURCES = [];
 
     if (objectsDirArg) {
@@ -432,7 +587,9 @@ function mainServer(portArg, objectsDirArg, objectsRepoArg, objectRepoTokenArg) 
         log(`Adding local LFS cache source: file://${resolvedObjectsDir}/ (structured)`);
         CACHE_SOURCES.push({
             url: `file://${resolvedObjectsDir}/`,
-            structuredPath: true
+            structuredPath: true,
+            authorization: undefined,
+            s3: undefined
         });
     }
 
@@ -458,11 +615,25 @@ function mainServer(portArg, objectsDirArg, objectsRepoArg, objectRepoTokenArg) 
             objectsRepoArg: objectsRepoArg,
             url: lfsBaseUrl,
             structuredPath: false,
-            authorization: objectRepoTokenArg ? `${objectRepoTokenArg}` : undefined
+            authorization: objectRepoTokenArg ? `${objectRepoTokenArg}` : undefined,
+            s3: undefined
         });
         log(`Adding HTTP LFS cache source: ${lfsBaseUrl} (structured: false, auth: ${!!objectRepoTokenArg})`);
     }
 
+    if (s3EndpointArg) {
+        CACHE_SOURCES.push({
+            url: s3EndpointArg,
+            structuredPath: false,
+            authorization: undefined,
+            s3: {
+                accessKeyId: s3AccessKeyArg,
+                secretAccessKey: s3SecretKeyArg,
+                bucket: s3BucketArg
+            }
+        });
+        log(`Adding S3 cache source: ${s3EndpointArg} (structured: false, auth: ${!!(s3AccessKeyArg && s3SecretKeyArg)})`);
+    }
 
     if (CACHE_SOURCES.length === 0) {
         console.error('No cache sources configured. Please provide --objects-dir and/or --objects-repo.');

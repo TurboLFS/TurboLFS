@@ -47,6 +47,10 @@ function turboMain(options, positional) {
         const objectsDir = getFromEnvOrArgs(options, 'objects-dir');
         const objectsRepo = getFromEnvOrArgs(options, 'objects-repo');
         const objectRepoToken = getFromEnvOrArgs(options, 'object-repo-token');
+        const s3Endpoint = getFromEnvOrArgs(options, 's3-endpoint');
+        const s3AccessKey = getFromEnvOrArgs(options, 's3-access-key');
+        const s3SecretKey = getFromEnvOrArgs(options, 's3-secret-key');
+        const s3Bucket = getFromEnvOrArgs(options, 's3-bucket');
         if (!port) {
             console.error('Error: --port is required for server mode.');
             return process.exit(1);
@@ -57,7 +61,23 @@ function turboMain(options, positional) {
             return process.exit(1);
         }
 
-        const success = aggregator.main(port, objectsDir, objectsRepo, objectRepoToken);
+        const s3Options = [s3Endpoint, s3AccessKey, s3SecretKey, s3Bucket];
+        const numSet = s3Options.filter(x => x !== undefined).length;
+        if (numSet > 0 && numSet < s3Options.length) {
+            console.error('Error: When using S3 storage, all of --s3-endpoint, --s3-access-key, --s3-secret-key, and --s3-bucket must be specified.');
+            return process.exit(1);
+        }
+
+        const success = aggregator.main(
+            port,
+            objectsDir,
+            objectsRepo,
+            objectRepoToken,
+            s3Endpoint,
+            s3AccessKey,
+            s3SecretKey,
+            s3Bucket
+        );
 
         if (!success) {
             return process.exit(1);
@@ -204,8 +224,12 @@ function printHelp() {
     console.log('Options:');
     console.log('  --port                Port to run the server on (default: 3000)');
     console.log('  --objects-dir         Path to store or read objects');
-    console.log('  --objects-repo        GitHub repo used for storing objects (format: owner/repo)');
+    console.log('  --objects-repo        GitHub repo used for reading objects (format: owner/repo)');
     console.log('  --object-repo-token   GitHub token for uploading objects');
+    console.log('  --s3-endpoint         S3-compatible storage endpoint URL');
+    console.log('  --s3-access-key       S3 access key ID');
+    console.log('  --s3-secret-key       S3 secret access key');
+    console.log('  --s3-bucket           S3 bucket name');
     console.log('  --url                 Server URL for the client to connect to');
     console.log('');
     console.log('Examples:');
