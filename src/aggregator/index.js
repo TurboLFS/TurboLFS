@@ -283,8 +283,60 @@ async function handleClientConnection(ws, req) {
                 : Readable.fromWeb(sourceStream); // Convert WHATWG ReadableStream (from fetch) to Node.js Readable
 
             let totalBytesStreamed = BigInt(0);
+
+            // --- Cache Promotion Setup ---
+            let fileWriteStream = null;
+            let tempCachePath = null;
+            let finalCachePath = null;
+            let isCachingAttempted = false;
+
+            // Condition: We are streaming from HTTP and a local file cache exists.
+            const localCacheSource = CACHE_SOURCES.find(s => s.url.startsWith('file://'));
+            if (streamDetails.sourceType === 'http' && localCacheSource) {
+                isCachingAttempted = true;
+                const localBasePath = localCacheSource.url.slice(7);
+                try {
+                    finalCachePath = secureResolvePath(localBasePath, oidHex, localCacheSource.structuredPath);
+                    // Use a temporary file to ensure atomic write. Suffix with PID for multi-process safety.
+                    tempCachePath = `${finalCachePath}.${process.pid}.tmp`;
+
+                    // Ensure the target directory exists (e.g., /path/to/cache/aa/bb/)
+                    await fsPromises.mkdir(path.dirname(finalCachePath), { recursive: true });
+
+                    fileWriteStream = fs.createWriteStream(tempCachePath);
+                    log(`[Cache] Staging OID ${oidHex} to temporary file: ${tempCachePath}`);
+
+                    // Handle write errors gracefully without stopping the client stream
+                    fileWriteStream.on('error', (err) => {
+                        log(`[Cache] ERROR writing OID ${oidHex} to ${tempCachePath}: ${err.message}. Aborting cache write, but continuing client stream.`);
+                        if (fileWriteStream) {
+                            fileWriteStream.destroy();
+                            fileWriteStream = null; // Prevent further writes
+                            // Clean up the failed temporary file
+                            fs.unlink(tempCachePath, (unlinkErr) => {
+                                if (unlinkErr) log(`[Cache] ERROR cleaning up failed temp file ${tempCachePath}: ${unlinkErr.message}`);
+                            });
+                        }
+                    });
+
+                } catch (cacheSetupErr) {
+                    log(`[Cache] ERROR setting up cache for OID ${oidHex}: ${cacheSetupErr.message}. Client stream will continue without caching.`);
+                    fileWriteStream = null; // Ensure we don't try to use it
+                }
+            }
+            // --- End Cache Promotion Setup ---
+
             try {
                 for await (const chunk of nodeStream) {
+                    // 1. Promote to local cache if setup was successful
+                    if (fileWriteStream) {
+                        if (!fileWriteStream.write(chunk)) {
+                            // Handle backpressure from the filesystem if necessary
+                            await new Promise(resolve => fileWriteStream.once('drain', resolve));
+                        }
+                    }
+
+                    // 2. Send chunk to the connected client via WebSocket
                     if (ws.readyState !== WebSocket.OPEN) {
                         log(`WebSocket connection for ${clientAddress} closed while streaming OID ${oidHex}. Aborting.`);
                         if (typeof nodeStream.destroy === 'function') nodeStream.destroy();
@@ -295,11 +347,11 @@ async function handleClientConnection(ws, req) {
                     dataChunkMessage.writeUInt8(MessageType.OBJECT_DATA_CHUNK, 0);
                     oidBin.copy(dataChunkMessage, 1);
                     chunk.copy(dataChunkMessage, 1 + 32);
+
                     if (ws.readyState === WebSocket.OPEN) {
                         ws.send(dataChunkMessage);
                         totalBytesStreamed += BigInt(chunk.length);
-                    }
-                    else {
+                    } else {
                         log(`WebSocket not open during chunk send for OID ${oidHex}. Aborting stream.`);
                         if (typeof nodeStream.destroy === 'function') nodeStream.destroy();
                         return;
@@ -313,6 +365,18 @@ async function handleClientConnection(ws, req) {
                     }
                 } else {
                     log(`Finished streaming OID ${oidHex} (${totalBytesStreamed} bytes) to ${clientAddress}`);
+                    // --- Commit Cache ---
+                    if (fileWriteStream) {
+                        await new Promise((resolve, reject) => {
+                            fileWriteStream.on('finish', resolve);
+                            fileWriteStream.on('error', reject); // Catch any final errors
+                            fileWriteStream.end();
+                        });
+                        await fsPromises.rename(tempCachePath, finalCachePath);
+                        log(`[Cache] Successfully promoted OID ${oidHex} to local cache: ${finalCachePath}`);
+                        tempCachePath = null; // Prevent cleanup from deleting the committed file
+                    }
+                    // --- End Commit Cache ---
                 }
 
             } catch (streamErr) {
@@ -324,7 +388,21 @@ async function handleClientConnection(ws, req) {
                 if (typeof nodeStream.destroy === 'function') {
                     nodeStream.destroy();
                 }
+                // --- Cleanup ---
+                // Clean up the write stream and any lingering temp file in case of an error or premature close
+                if (fileWriteStream) fileWriteStream.destroy();
+                if (tempCachePath) { // If it's not null, the rename hasn't happened
+                    try {
+                        await fsPromises.unlink(tempCachePath);
+                        log(`[Cache] Cleaned up temporary file due to incomplete transfer: ${tempCachePath}`);
+                    } catch (cleanupErr) {
+                        if (cleanupErr.code !== 'ENOENT') { // It's okay if the file is already gone
+                            log(`[Cache] ERROR during cleanup of temp file ${tempCachePath}: ${cleanupErr.message}`);
+                        }
+                    }
+                }
                 log(`Cleaned up stream for OID ${oidHex}`);
+                // --- End Cleanup ---
             }
 
         } else {
