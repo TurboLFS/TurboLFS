@@ -32,7 +32,7 @@ function turboMain(options, positional) {
     }
 
     if (mode === "client") {
-        const url = options.url;
+        const url = getFromEnvOrArgs(options, 'url');
 
         if (!url) {
             console.error('Error: --url is required for client mode.');
@@ -43,10 +43,10 @@ function turboMain(options, positional) {
     }
 
     if (mode === "server") {
-        const port = options.port;
-        const objectsDir = options['objects-dir'];
-        const objectsRepo = options['objects-repo'];
-        const objectRepoToken = options['object-repo-token'];
+        const port = getFromEnvOrArgs(options, 'port');
+        const objectsDir = getFromEnvOrArgs(options, 'objects-dir');
+        const objectsRepo = getFromEnvOrArgs(options, 'objects-repo');
+        const objectRepoToken = getFromEnvOrArgs(options, 'object-repo-token');
         if (!port) {
             console.error('Error: --port is required for server mode.');
             return process.exit(1);
@@ -68,6 +68,20 @@ function turboMain(options, positional) {
 async function gitMain(argv) {
     let gitArgs = argv.slice(2); // Everything after `node src/index.js`
 
+    // Parse --turbolfs-url and remove it from gitArgs
+    let urlOption = "ws://localhost:3000";
+    for (let i = 0; i < gitArgs.length; i++) {
+        if (gitArgs[i] === '--turbolfs-url' && gitArgs[i + 1]) {
+            urlOption = gitArgs[i + 1];
+            gitArgs.splice(i, 2);
+            break;
+        } else if (gitArgs[i].startsWith('--turbolfs-url=')) {
+            urlOption = gitArgs[i].slice('--turbolfs-url='.length);
+            gitArgs.splice(i, 1);
+            break;
+        }
+    }
+
     // TODO: support node/bun instead of compiled single binary
     // const exe = os.platform() === 'win32' ? 'turbolfs.exe' : 'turbolfs';
     //const exe = "/Users/leonidpospelov/projects/lfs-experiment/turbolfs"; // todo
@@ -86,7 +100,7 @@ async function gitMain(argv) {
         argsPrefix = argsPrefix.replace(/\\/g, '/');
     }
 
-    const urlOption = "ws://localhost:3000"; // TODO
+    // urlOption is now set above
 
     const gitPath = process.env.TURBOLFS_GIT_PATH || 'git';
 
@@ -234,4 +248,16 @@ function parseArgs(argv) {
     }
 
     return { options, positional };
+}
+
+function getFromEnvOrArgs(options, key) {
+    const envKey = key.toUpperCase().replace(/-/g, '_');
+
+    const value1 = options[key];
+    const value2 = process.env[envKey];
+    if (value1 && value2) {
+        console.error(`Error: Both --${key} and environment variable ${envKey} are set. Please set only one.`);
+        process.exit(1);
+    }
+    return value1 || value2;
 }

@@ -391,7 +391,7 @@ function mainServer(portArg, objectsDirArg, objectsRepoArg, objectRepoTokenArg) 
         return false;
     }
 
-    const wss = new WebSocket.Server({ port: portArg });
+    const wss = new WebSocket.Server({ port: parseInt(portArg) });
 
     wss.on('connection', (ws, req) => {
         handleClientConnection(ws, req).catch(err => {
