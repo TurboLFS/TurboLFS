@@ -1,17 +1,16 @@
-FROM oven/bun:1.2.21-slim
+FROM node:20
 
 WORKDIR /app
 
 COPY package.json ./
 COPY yarn.lock ./
 
-RUN bun install
+RUN yarn install --frozen-lockfile
 
 COPY . .
 
 EXPOSE 3000
 
-# Run your app with Bun
-CMD ["bun", "src"]
+CMD ["node", "src"]
 
 # docker build -t turbolfs:latest .
