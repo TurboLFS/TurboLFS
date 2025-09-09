@@ -5,7 +5,7 @@ const path = require('path');
 const { Readable, PassThrough } = require('stream');
 const { S3Client, ListObjectsV2Command, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { Upload } = require('@aws-sdk/lib-storage');
-const { limitFunction } = require('p-limit');
+const limit = require('p-limit').default;
 
 let CACHE_SOURCES;
 const SUPPORTED_PROTOCOL_VERSION_BY_SERVER = 1;
@@ -140,13 +140,13 @@ async function preDownloadSmallFilesFromS3(s3Source, fsCacheSource, maxTotalSize
     log(`[Pre-Download] Selected ${objectsToDownload.length} smallest objects, totaling ${(currentTotalSize / (1024 * 1024)).toFixed(2)} MB, for download.`);
 
     // Step 4: Download selected objects concurrently
-    const limit = limitFunction(concurrency);
+    const concurrencyLimiter = limit(concurrency);
     let downloadedCount = 0;
     let failedCount = 0;
     let skippedCount = 0;
 
     const downloadPromises = objectsToDownload.map(s3Object => {
-        return limit(async () => {
+        return concurrencyLimiter(async () => {
             // Assuming the OID is the file name (basename of the S3 key)
             const oidHex = path.basename(s3Object.Key);
 
