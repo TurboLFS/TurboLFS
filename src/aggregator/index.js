@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { Readable, PassThrough } = require('stream');
 const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
+const { Upload } = require('@aws-sdk/lib-storage');
 
 let CACHE_SOURCES;
 const SUPPORTED_PROTOCOL_VERSION_BY_SERVER = 1;
