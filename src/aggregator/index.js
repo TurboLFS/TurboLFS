@@ -3,7 +3,7 @@ const fsPromises = require('fs/promises');
 const fs = require('fs');
 const path = require('path');
 const { Readable, PassThrough } = require('stream');
-const { S3Client, ListObjectsV2Command, GetObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, ListObjectsV2Command, GetObjectCommand, paginateListObjectsV2 } = require('@aws-sdk/client-s3');
 const { Upload } = require('@aws-sdk/lib-storage');
 const limit = require('p-limit').default;
 
@@ -95,28 +95,32 @@ async function preDownloadSmallFilesFromS3(s3Source, fsCacheSource, maxTotalSize
     log(`[Pre-Download] Starting pre-download from S3 bucket '${bucketName}' to '${localBasePath}'.`);
     log(`[Pre-Download] Max cache size: ${(maxTotalSizeBytes / (1024 * 1024)).toFixed(2)} MB, Concurrency: ${concurrency}.`);
 
-    // Step 1: List all objects from S3, handling pagination
+    // Step 1: List all objects from S3 using the paginator
     let allObjects = [];
     try {
-        let isTruncated = true;
-        let continuationToken = undefined;
         log(`[Pre-Download] Listing objects from s3://${bucketName}/${s3Prefix}...`);
+        
+        // Configuration for the paginator
+        const paginatorConfig = {
+            client: s3Client,
+            pageSize: 1000 // Optional: can be tuned, but 1000 is the default and max
+        };
 
-        while (isTruncated) {
-            const command = new ListObjectsV2Command({
-                Bucket: bucketName,
-                Prefix: s3Prefix,
-                ContinuationToken: continuationToken,
-            });
-            const response = await s3Client.send(command);
-            if (response.Contents) {
+        // The command parameters
+        const commandParams = {
+            Bucket: bucketName,
+            Prefix: s3Prefix,
+        };
+
+        // Use the paginator with a for-await-of loop
+        for await (const page of paginateListObjectsV2(paginatorConfig, commandParams)) {
+            if (page.Contents) {
                 // Filter out any "directory" objects by ensuring they have a size > 0
-                const files = response.Contents.filter(obj => obj.Size > 0);
+                const files = page.Contents.filter(obj => obj.Size > 0);
                 allObjects.push(...files);
             }
-            isTruncated = response.IsTruncated;
-            continuationToken = response.NextContinuationToken;
         }
+
         log(`[Pre-Download] Found ${allObjects.length} total objects in S3.`);
     } catch (err) {
         log(`[Pre-Download] ERROR: Failed to list objects from S3: ${err.message}`);
@@ -126,6 +130,7 @@ async function preDownloadSmallFilesFromS3(s3Source, fsCacheSource, maxTotalSize
     // Step 2: Sort objects by size (smallest first)
     allObjects.sort((a, b) => a.Size - b.Size);
 
+    // ... The rest of your function remains the same
     // Step 3: Select objects to download up to the max size limit
     const objectsToDownload = [];
     let currentTotalSize = 0;
