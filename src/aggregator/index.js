@@ -360,7 +360,7 @@ async function fetchStreamAndSizeFromSources(filenameOid, sizeBigint) {
                     forcePathStyle: !!source.url, // Required for most S3-compatible services
                 });
 
-                const s3Key = secureResolvePath(source.s3.prefix || '', filenameOid, structured);
+                const s3Key = unsafeResolvePath(source.s3.prefix || '', filenameOid, structured);
 
                 const getObjectParams = {
                     Bucket: source.s3.bucket,
