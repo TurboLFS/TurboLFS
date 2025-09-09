@@ -3,7 +3,7 @@ const fsPromises = require('fs/promises');
 const fs = require('fs');
 const path = require('path');
 const { Readable, PassThrough } = require('stream');
-const { S3Client, GetObjectCommand, ListObjectsV2Command, GetObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, ListObjectsV2Command, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { Upload } = require('@aws-sdk/lib-storage');
 const pLimit = require('p-limit');
 
