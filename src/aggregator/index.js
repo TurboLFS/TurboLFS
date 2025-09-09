@@ -600,6 +600,7 @@ function mainServer(
     s3BucketArg,
     s3RegionArg
 ) {
+    // CACHE_SOURCES order is important - earlier sources have higher priority for reads.
     CACHE_SOURCES = [];
 
     if (objectsDirArg) {
@@ -611,6 +612,21 @@ function mainServer(
             authorization: undefined,
             s3: undefined
         });
+    }
+
+    if (s3EndpointArg) {
+        CACHE_SOURCES.push({
+            url: s3EndpointArg,
+            structuredPath: false,
+            authorization: undefined,
+            s3: {
+                accessKeyId: s3AccessKeyArg,
+                secretAccessKey: s3SecretKeyArg,
+                bucket: s3BucketArg,
+                region: s3RegionArg,
+            }
+        });
+        log(`Adding S3 cache source: ${s3EndpointArg} (structured: false, auth: ${!!(s3AccessKeyArg && s3SecretKeyArg)})`);
     }
 
     if (objectsRepoArg) {
@@ -639,21 +655,6 @@ function mainServer(
             s3: undefined
         });
         log(`Adding HTTP LFS cache source: ${lfsBaseUrl} (structured: false, auth: ${!!objectRepoTokenArg})`);
-    }
-
-    if (s3EndpointArg) {
-        CACHE_SOURCES.push({
-            url: s3EndpointArg,
-            structuredPath: false,
-            authorization: undefined,
-            s3: {
-                accessKeyId: s3AccessKeyArg,
-                secretAccessKey: s3SecretKeyArg,
-                bucket: s3BucketArg,
-                region: s3RegionArg,
-            }
-        });
-        log(`Adding S3 cache source: ${s3EndpointArg} (structured: false, auth: ${!!(s3AccessKeyArg && s3SecretKeyArg)})`);
     }
 
     if (CACHE_SOURCES.length === 0) {
