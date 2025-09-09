@@ -2,7 +2,7 @@ const WebSocket = require('ws');
 const fsPromises = require('fs/promises');
 const fs = require('fs');
 const path = require('path');
-const { Readable } = require('stream');
+const { Readable, PassThrough } = require('stream');
 const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
 
 let CACHE_SOURCES;
