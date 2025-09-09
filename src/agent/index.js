@@ -60,7 +60,13 @@ const state = {
     serverProtocolVersion: null,
     agentReadyForLFS: false,
     incomingMessagesQueue: [], // Queue them to process sequentially, avoiding concurrency issues in writing to a file
-    incomingMessagesQueueAddEvent: new EventEmitter()
+    incomingMessagesQueueAddEvent: new EventEmitter(),
+
+    // --- properties for reconnection ---
+    wsUrl: null,
+    reconnectDelay: 1000,
+    maxReconnectDelay: 60000,
+    reconnectTimerId: null,
 };
 
 async function main(backendUrlArg) {
@@ -82,6 +88,24 @@ async function main(backendUrlArg) {
 
     initNetworking(wsUrl);
     initIncomingMessagesQueueLoop();
+}
+
+function scheduleReconnect() {
+    // If a reconnect is already scheduled, do nothing.
+    if (state.reconnectTimerId) {
+        return;
+    }
+
+    log(`Connection lost. Will attempt to reconnect in ${state.reconnectDelay / 1000} seconds.`);
+
+    state.reconnectTimerId = setTimeout(() => {
+        log(`Attempting to reconnect to ${state.wsUrl}...`);
+        initNetworking(state.wsUrl); // Call the main connection function again
+        state.reconnectTimerId = null; // Clear the timer ID after it has run
+    }, state.reconnectDelay);
+
+    // Apply exponential backoff for the next potential failure
+    state.reconnectDelay = Math.min(state.reconnectDelay * 2, state.maxReconnectDelay);
 }
 
 async function createTempDirectory() {
@@ -318,6 +342,9 @@ async function handleObjectTransferErrorNotification(message) {
 
 
 function initNetworking(wsUrl) {
+    // Store the URL in the state so we can use it for reconnecting
+    state.wsUrl = wsUrl;
+
     log(`Attempting to connect to WebSocket server: ${wsUrl}`);
     const client = new WebSocket(wsUrl, {
         binaryType: 'nodebuffer',
@@ -326,6 +353,13 @@ function initNetworking(wsUrl) {
 
     client.on('open', () => {
         log(`Connected to WebSocket server: ${wsUrl}`);
+        
+        // --- Reset reconnection logic on a successful connection ---
+        state.reconnectDelay = 1000; // Reset delay to its initial value
+        if (state.reconnectTimerId) {
+            clearTimeout(state.reconnectTimerId); // Cancel any scheduled reconnect
+            state.reconnectTimerId = null;
+        }
         // Server should send protocol version first. Agent waits for it.
     });
 
@@ -366,7 +400,8 @@ function initNetworking(wsUrl) {
 
     client.on('error', (err) => {
         log(`WebSocket Error: ${err.message}`);
-        // TODO: More sophisticated error handling could involve retries or specific LFS error reporting
+        // The 'close' event will usually fire immediately after 'error',
+        // so we'll let the 'close' handler manage the reconnection logic.
         if (state.currentDownload) {
             state.lfs.sendToLfs({ event: "complete", oid: state.currentDownload.oid, error: { code: 1, message: `WebSocket connection error: ${err.message}` } });
             if (state.currentDownload.fileHandle) {
@@ -376,13 +411,13 @@ function initNetworking(wsUrl) {
         }
         state.isProcessingQueue = false;
         state.agentReadyForLFS = false; // No longer ready if connection drops
-        // TODO: Consider if process.exit(1) is appropriate or if LFS terminate will handle it
     });
 
     client.on('close', (code, reason) => {
         const reasonStr = reason ? reason.toString() : 'No reason provided';
         log(`Disconnected from WebSocket server. Code: ${code}, Reason: ${reasonStr}`);
         state.agentReadyForLFS = false;
+
         if (state.currentDownload) {
             log(`Connection closed during active download of ${state.currentDownload.oid}. Reporting error to LFS.`);
             state.lfs.sendToLfs({ event: "complete", oid: state.currentDownload.oid, error: { code: 1, message: `Connection closed during transfer. Code: ${code}` } });
@@ -392,6 +427,8 @@ function initNetworking(wsUrl) {
             state.currentDownload = null;
         }
         state.isProcessingQueue = false;
+
+        scheduleReconnect();
     });
 }
 
