@@ -5,17 +5,6 @@ const path = require('path');
 const { Readable } = require('stream');
 const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
 
-// --- FS Cache Promotion Vars ---
-let fileWriteStream;
-let tempCachePath;
-let finalCachePath;
-let isCachingAttempted;
-
-// --- S3 Cache Promotion Vars ---
-let s3WriteStream; // This will be a PassThrough stream
-let s3UploadPromise; // The promise returned by the S3 Upload utility
-let isS3CachingAttempted;
-
 let CACHE_SOURCES;
 const SUPPORTED_PROTOCOL_VERSION_BY_SERVER = 1;
 
@@ -42,12 +31,17 @@ function log(...args) {
     console.error(`[${timestamp}] [Aggregator]`, ...args);
 }
 
-const secureResolvePath = (base, oid, structured) => {
+const unsafeResolvePath = (base, oid, structured) => {
     const unsafePath = structured
         ? path.join(base, oid.slice(0, 2), oid.slice(2, 4), oid)
         : path.join(base, oid);
 
     const normalized = path.normalize(unsafePath);
+    return normalized;
+};
+
+const secureResolvePath = (base, oid, structured) => {
+    const normalized = unsafeResolvePath(base, oid, structured);
     const resolvedBase = path.resolve(base);
 
     if (!normalized.startsWith(resolvedBase + path.sep) && normalized !== resolvedBase) {
@@ -60,11 +54,11 @@ const secureResolvePath = (base, oid, structured) => {
     return normalized;
 };
 
-async function resetFsCachePromotion(streamDetails, oidHex) {
-    fileWriteStream = null;
-    tempCachePath = null;
-    finalCachePath = null;
-    isCachingAttempted = false;
+async function setupFsCachePromotion(streamDetails, oidHex) {
+    let fileWriteStream = null;
+    let tempCachePath = null;
+    let finalCachePath = null;
+    let isCachingAttempted = false;
 
     // Condition: We are streaming from HTTP and a local file cache exists.
     const localCacheSource = CACHE_SOURCES.find(s => s.url.startsWith('file://'));
@@ -100,34 +94,58 @@ async function resetFsCachePromotion(streamDetails, oidHex) {
             fileWriteStream = null; // Ensure we don't try to use it
         }
     }
+
+    return {
+        fileWriteStream,
+        tempCachePath,
+        finalCachePath,
+        isCachingAttempted
+    };
 }
 
-async function promoteFsCacheIfNeeded(chunk) {
-    if (fileWriteStream) {
-        if (!fileWriteStream.write(chunk)) {
+async function promoteFsCacheIfNeeded(fsCacheState, chunk) {
+    if (fsCacheState.fileWriteStream) {
+        if (!fsCacheState.fileWriteStream.write(chunk)) {
             // Handle backpressure from the filesystem if necessary
-            await new Promise(resolve => fileWriteStream.once('drain', resolve));
+            await new Promise(resolve => fsCacheState.fileWriteStream.once('drain', resolve));
         }
     }
 }
 
-async function commitFsCacheIfNeeded(oidHex) {
-    if (fileWriteStream) {
+async function commitFsCacheIfNeeded(fsCacheState, oidHex) {
+    if (fsCacheState.fileWriteStream) {
         await new Promise((resolve, reject) => {
-            fileWriteStream.on('finish', resolve);
-            fileWriteStream.on('error', reject); // Catch any final errors
-            fileWriteStream.end();
+            fsCacheState.fileWriteStream.on('finish', resolve);
+            fsCacheState.fileWriteStream.on('error', reject); // Catch any final errors
+            fsCacheState.fileWriteStream.end();
         });
-        await fsPromises.rename(tempCachePath, finalCachePath);
-        log(`[Cache] Successfully promoted OID ${oidHex} to local cache: ${finalCachePath}`);
-        tempCachePath = null; // Prevent cleanup from deleting the committed file
+        await fsPromises.rename(fsCacheState.tempCachePath, fsCacheState.finalCachePath);
+        log(`[Cache] Successfully promoted OID ${oidHex} to local cache: ${fsCacheState.finalCachePath}`);
+        fsCacheState.tempCachePath = null; // Prevent cleanup from deleting the committed file
     }
 }
 
-async function resetS3CachePromotion(streamDetails, oidHex) {
-    s3WriteStream = null;
-    s3UploadPromise = null;
-    isS3CachingAttempted = false;
+async function performPostFsCachePromotionCleanupIfNeeded(fsCacheState) {
+    if (fsCacheState.fileWriteStream) {
+        fsCacheState.fileWriteStream.destroy();
+    }
+
+    if (fsCacheState.tempCachePath) { // If it's not null, the rename hasn't happened
+        try {
+            await fsPromises.unlink(fsCacheState.tempCachePath);
+            log(`[Cache] Cleaned up temporary file due to incomplete transfer: ${fsCacheState.tempCachePath}`);
+        } catch (cleanupErr) {
+            if (cleanupErr.code !== 'ENOENT') { // It's okay if the file is already gone
+                log(`[Cache] ERROR during cleanup of temp file ${fsCacheState.tempCachePath}: ${cleanupErr.message}`);
+            }
+        }
+    }
+}
+
+async function setupS3CachePromotion(streamDetails, oidHex) {
+    let s3WriteStream = null;
+    let s3UploadPromise = null;
+    let isS3CachingAttempted = false;
 
     // Condition: We are NOT streaming from S3 and an S3 cache destination exists.
     const s3CacheSource = CACHE_SOURCES.find(s => s.s3);
@@ -147,7 +165,7 @@ async function resetS3CachePromotion(streamDetails, oidHex) {
             });
 
             // The key for the object in the S3 bucket
-            const s3Key = secureResolvePath(s3CacheSource.s3.prefix || '', oidHex, s3CacheSource.structuredPath);
+            const s3Key = unsafeResolvePath(s3CacheSource.s3.prefix || '', oidHex, s3CacheSource.structuredPath);
 
             // Create a PassThrough stream to pipe the data into the S3 upload
             s3WriteStream = new PassThrough();
@@ -179,13 +197,19 @@ async function resetS3CachePromotion(streamDetails, oidHex) {
             s3UploadPromise = null;
         }
     }
+
+    return {
+        s3WriteStream,
+        s3UploadPromise,
+        isS3CachingAttempted
+    };
 }
 
-async function promoteS3CacheIfNeeded(chunk) {
-    if (s3WriteStream && !s3WriteStream.destroyed) {
+async function promoteS3CacheIfNeeded(s3CacheState, chunk) {
+    if (s3CacheState.s3WriteStream && !s3CacheState.s3WriteStream.destroyed) {
         if (!s3WriteStream.write(chunk)) {
             // Handle backpressure from the S3 upload stream
-            await new Promise(resolve => s3WriteStream.once('drain', resolve));
+            await new Promise(resolve => s3CacheState.s3WriteStream.once('drain', resolve));
         }
     }
 }
@@ -198,6 +222,10 @@ async function commitS3CacheIfNeeded(oidHex) {
         await s3UploadPromise;
         log(`[Cache] Successfully promoted OID ${oidHex} to S3 cache.`);
     }
+}
+
+async function performPostS3CachePromotionCleanupIfNeeded(_s3CacheState) {
+    // No-op, S3 impl doesn't require any cleanup at this moment
 }
 
 /**
@@ -474,15 +502,15 @@ async function handleClientConnection(ws, req) {
 
             let totalBytesStreamed = BigInt(0);
 
-            await resetFsCachePromotion(streamDetails, oidHex);
-            await resetS3CachePromotion(streamDetails, oidHex);
+            let fsCacheState = await setupFsCachePromotion(streamDetails, oidHex);
+            let s3CacheState = await setupS3CachePromotion(streamDetails, oidHex);
 
             try {
                 for await (const chunk of nodeStream) {
                     // Promote if needed
                     await Promise.all([
-                        promoteFsCacheIfNeeded(chunk),
-                        promoteS3CacheIfNeeded(chunk)
+                        promoteFsCacheIfNeeded(fsCacheState, chunk),
+                        promoteS3CacheIfNeeded(s3CacheState, chunk)
                     ]);
 
                     // Send chunk to client
@@ -517,8 +545,8 @@ async function handleClientConnection(ws, req) {
 
                     try {
                         await Promise.all([
-                            commitFsCacheIfNeeded(oidHex),
-                            commitS3CacheIfNeeded(oidHex),
+                            commitFsCacheIfNeeded(fsCacheState, oidHex),
+                            commitS3CacheIfNeeded(s3CacheState, oidHex),
                         ]);
                     } catch (cacheErr) {
                         log(`[Cache] ERROR during final cache promotion for OID ${oidHex}: ${cacheErr.message}`);
@@ -534,21 +562,11 @@ async function handleClientConnection(ws, req) {
                 if (typeof nodeStream.destroy === 'function') {
                     nodeStream.destroy();
                 }
-                // --- Cleanup ---
-                // Clean up the write stream and any lingering temp file in case of an error or premature close
-                if (fileWriteStream) fileWriteStream.destroy();
-                if (tempCachePath) { // If it's not null, the rename hasn't happened
-                    try {
-                        await fsPromises.unlink(tempCachePath);
-                        log(`[Cache] Cleaned up temporary file due to incomplete transfer: ${tempCachePath}`);
-                    } catch (cleanupErr) {
-                        if (cleanupErr.code !== 'ENOENT') { // It's okay if the file is already gone
-                            log(`[Cache] ERROR during cleanup of temp file ${tempCachePath}: ${cleanupErr.message}`);
-                        }
-                    }
-                }
+
+                await performPostFsCachePromotionCleanupIfNeeded(fsCacheState);
+                await performPostS3CachePromotionCleanupIfNeeded(s3CacheState);
+
                 log(`Cleaned up stream for OID ${oidHex}`);
-                // --- End Cleanup ---
             }
 
         } else {
