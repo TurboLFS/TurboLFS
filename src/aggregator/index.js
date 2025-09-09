@@ -321,9 +321,11 @@ async function setupS3CachePromotion(streamDetails, oidHex) {
     let s3UploadPromise = null;
     let isS3CachingAttempted = false;
 
+    const isS3Banned = s3global.oidHexBannedFromPromote.has(oidHex);
+
     // Condition: We are NOT streaming from S3 and an S3 cache destination exists.
     const s3CacheSource = CACHE_SOURCES.find(s => s.s3);
-    if (streamDetails.sourceType !== 's3' && s3CacheSource) {
+    if (streamDetails.sourceType !== 's3' && s3CacheSource && !isS3Banned) {
         isS3CachingAttempted = true;
         log(`[Cache] OID ${oidHex} is eligible for S3 cache promotion.`);
 
@@ -702,11 +704,7 @@ async function handleClientConnection(ws, req) {
                 for await (const chunk of nodeStream) {
                     // Promote if needed
                     //await promoteFsCacheIfNeeded(fsCacheState, chunk);
-                    if (!s3global.oidHexBannedFromPromote.has(oidHex)) {
-                        await promoteS3CacheIfNeeded(s3CacheState, chunk);
-                    } else {
-                        log(`[Cache] Skipping S3 promotion for OID ${oidHex} as it is recently downloaded.`);
-                    }
+                    await promoteS3CacheIfNeeded(s3CacheState, chunk);
 
                     // Send chunk to client
                     if (ws.readyState !== WebSocket.OPEN) {
