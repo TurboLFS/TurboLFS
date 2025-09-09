@@ -208,7 +208,7 @@ async function setupS3CachePromotion(streamDetails, oidHex) {
 
 async function promoteS3CacheIfNeeded(s3CacheState, chunk) {
     if (s3CacheState.s3WriteStream && !s3CacheState.s3WriteStream.destroyed) {
-        if (!s3WriteStream.write(chunk)) {
+        if (!s3CacheState.s3WriteStream.write(chunk)) {
             // Handle backpressure from the S3 upload stream
             await new Promise(resolve => s3CacheState.s3WriteStream.once('drain', resolve));
         }
@@ -216,11 +216,11 @@ async function promoteS3CacheIfNeeded(s3CacheState, chunk) {
 }
 
 async function commitS3CacheIfNeeded(oidHex) {
-    if (s3UploadPromise) {
-        if (s3WriteStream && !s3WriteStream.destroyed) {
-            s3WriteStream.end(); // Signal the end of the stream
+    if (s3CacheState.s3UploadPromise) {
+        if (s3CacheState.s3WriteStream && !s3CacheState.s3WriteStream.destroyed) {
+            s3CacheState.s3WriteStream.end(); // Signal the end of the stream
         }
-        await s3UploadPromise;
+        await s3CacheState.s3UploadPromise;
         log(`[Cache] Successfully promoted OID ${oidHex} to S3 cache.`);
     }
 }
