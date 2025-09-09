@@ -51,6 +51,7 @@ function turboMain(options, positional) {
         const s3AccessKey = getFromEnvOrArgs(options, 's3-access-key');
         const s3SecretKey = getFromEnvOrArgs(options, 's3-secret-key');
         const s3Bucket = getFromEnvOrArgs(options, 's3-bucket');
+        const s3Region = getFromEnvOrArgs(options, 's3-region');
         if (!port) {
             console.error('Error: --port is required for server mode.');
             return process.exit(1);
@@ -61,10 +62,10 @@ function turboMain(options, positional) {
             return process.exit(1);
         }
 
-        const s3Options = [s3Endpoint, s3AccessKey, s3SecretKey, s3Bucket];
+        const s3Options = [s3Endpoint, s3AccessKey, s3SecretKey, s3Bucket, s3Region];
         const numSet = s3Options.filter(x => x !== undefined).length;
         if (numSet > 0 && numSet < s3Options.length) {
-            console.error('Error: When using S3 storage, all of --s3-endpoint, --s3-access-key, --s3-secret-key, and --s3-bucket must be specified.');
+            console.error('Error: When using S3 storage, all of --s3-endpoint, --s3-access-key, --s3-secret-key, --s3-bucket, and --s3-region must be specified.');
             return process.exit(1);
         }
 
@@ -76,7 +77,8 @@ function turboMain(options, positional) {
             s3Endpoint,
             s3AccessKey,
             s3SecretKey,
-            s3Bucket
+            s3Bucket,
+            s3Region
         );
 
         if (!success) {
@@ -230,6 +232,7 @@ function printHelp() {
     console.log('  --s3-access-key       S3 access key ID');
     console.log('  --s3-secret-key       S3 secret access key');
     console.log('  --s3-bucket           S3 bucket name');
+    console.log('  --s3-region           S3 region');
     console.log('  --url                 Server URL for the client to connect to');
     console.log('');
     console.log('Examples:');

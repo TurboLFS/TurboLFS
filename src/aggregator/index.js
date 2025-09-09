@@ -597,7 +597,8 @@ function mainServer(
     s3EndpointArg,
     s3AccessKeyArg,
     s3SecretKeyArg,
-    s3BucketArg
+    s3BucketArg,
+    s3RegionArg
 ) {
     CACHE_SOURCES = [];
 
@@ -648,7 +649,8 @@ function mainServer(
             s3: {
                 accessKeyId: s3AccessKeyArg,
                 secretAccessKey: s3SecretKeyArg,
-                bucket: s3BucketArg
+                bucket: s3BucketArg,
+                region: s3RegionArg,
             }
         });
         log(`Adding S3 cache source: ${s3EndpointArg} (structured: false, auth: ${!!(s3AccessKeyArg && s3SecretKeyArg)})`);
