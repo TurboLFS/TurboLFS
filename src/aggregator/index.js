@@ -10,6 +10,12 @@ const limit = require('p-limit').default;
 let CACHE_SOURCES;
 const SUPPORTED_PROTOCOL_VERSION_BY_SERVER = 1;
 
+let s3global = {
+    queue: [],
+    maxConcurrent: 20,
+    oidHexBannedFromPromote: new Set()
+};
+
 const MessageType = {
     // Agent -> Aggregator
     OBJECT_DOWNLOAD_REQUEST: 0x01,
@@ -191,6 +197,7 @@ async function preDownloadSmallFilesFromS3(s3Source, fsCacheSource, maxTotalSize
                 // Atomically move the temp file to its final destination
                 await fsPromises.rename(tempCachePath, finalCachePath);
                 downloadedCount++;
+                s3global.oidHexBannedFromPromote.add(oidHex); // Prevent immediate re-promotion
                 if (downloadedCount > 0 && downloadedCount % 100 === 0) {
                     log(`[Pre-Download] Progress: Downloaded ${downloadedCount} / ${objectsToDownload.length - skippedCount} files.`);
                 }
@@ -375,11 +382,6 @@ async function promoteS3CacheIfNeeded(s3CacheState, chunk) {
         }
     }
 }
-
-let s3global = {
-    queue: [],
-    maxConcurrent: 20
-};
 
 async function commitS3CacheIfNeeded(s3CacheState, oidHex) {
     if (s3CacheState.s3UploadPromise) {
@@ -694,10 +696,12 @@ async function handleClientConnection(ws, req) {
             try {
                 for await (const chunk of nodeStream) {
                     // Promote if needed
-                    await Promise.all([
-                        //promoteFsCacheIfNeeded(fsCacheState, chunk),
-                        promoteS3CacheIfNeeded(s3CacheState, chunk)
-                    ]);
+                    //await promoteFsCacheIfNeeded(fsCacheState, chunk);
+                    if (!s3global.oidHexBannedFromPromote.has(oidHex)) {
+                        await promoteS3CacheIfNeeded(s3CacheState, chunk);
+                    } else {
+                        log(`[Cache] Skipping S3 promotion for OID ${oidHex} as it is recently downloaded.`);
+                    }
 
                     // Send chunk to client
                     if (ws.readyState !== WebSocket.OPEN) {
