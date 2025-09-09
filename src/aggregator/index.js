@@ -70,7 +70,7 @@ function makeTempCachePath(finalCachePath, func) {
  * @param {number} [maxTotalSizeBytes=1073741824] - The maximum total size of files to download (defaults to 1 GB).
  * @param {number} [concurrency=10] - The number of files to download in parallel.
  */
-async function preDownloadSmallFilesFromS3(s3Source, fsCacheSource, maxTotalSizeBytes = 1 * 1024 * 1024 * 1024, concurrency = 10) {
+async function preDownloadSmallFilesFromS3(s3Source, fsCacheSource, maxTotalSizeBytes = Math.floor(1.5 * 1024 * 1024 * 1024), concurrency = 10) {
     if (!s3Source || !s3Source.s3 || !s3Source.s3.client) {
         log('[Pre-Download] Invalid S3 source configuration provided.');
         return;
@@ -381,8 +381,19 @@ async function commitS3CacheIfNeeded(s3CacheState, oidHex) {
         if (s3CacheState.s3WriteStream && !s3CacheState.s3WriteStream.destroyed) {
             s3CacheState.s3WriteStream.end(); // Signal the end of the stream
         }
-        await s3CacheState.s3UploadPromise;
-        log(`[Cache] Successfully promoted OID ${oidHex} to S3 cache.`);
+
+        // TODO: look into it
+
+        // await s3CacheState.s3UploadPromise
+        // log(`[Cache] Successfully promoted OID ${oidHex} to S3 cache.`);
+
+        s3CacheState.s3UploadPromise.then(() => {
+            log(`[Cache] Successfully promoted OID ${oidHex} to S3 cache.`);
+        }).catch(err => {
+            log(`[Cache] ERROR during S3 upload finalization for OID ${oidHex}: ${err.message}`);
+        });
+
+        s3CacheState.s3UploadPromise = null;
     }
 }
 
@@ -656,7 +667,7 @@ async function handleClientConnection(ws, req) {
 
             let totalBytesStreamed = BigInt(0);
 
-            let fsCacheState = await setupFsCachePromotion(streamDetails, oidHex);
+            //let fsCacheState = await setupFsCachePromotion(streamDetails, oidHex);
             let s3CacheState = await setupS3CachePromotion(streamDetails, oidHex);
 
             try {
@@ -699,7 +710,7 @@ async function handleClientConnection(ws, req) {
 
                     try {
                         await Promise.all([
-                            commitFsCacheIfNeeded(fsCacheState, oidHex),
+                            //commitFsCacheIfNeeded(fsCacheState, oidHex),
                             commitS3CacheIfNeeded(s3CacheState, oidHex),
                         ]);
                     } catch (cacheErr) {
@@ -717,7 +728,7 @@ async function handleClientConnection(ws, req) {
                     nodeStream.destroy();
                 }
 
-                await performPostFsCachePromotionCleanupIfNeeded(fsCacheState);
+                //await performPostFsCachePromotionCleanupIfNeeded(fsCacheState);
                 await performPostS3CachePromotionCleanupIfNeeded(s3CacheState);
 
                 log(`Cleaned up stream for OID ${oidHex}`);
