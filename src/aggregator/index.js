@@ -376,22 +376,43 @@ async function promoteS3CacheIfNeeded(s3CacheState, chunk) {
     }
 }
 
+let s3global = {
+    queue: [],
+    maxConcurrent: 20
+};
+
 async function commitS3CacheIfNeeded(s3CacheState, oidHex) {
     if (s3CacheState.s3UploadPromise) {
         if (s3CacheState.s3WriteStream && !s3CacheState.s3WriteStream.destroyed) {
             s3CacheState.s3WriteStream.end(); // Signal the end of the stream
         }
 
-        // TODO: look into it
+        // Wrap the upload promise with logging
+        const uploadPromise = s3CacheState.s3UploadPromise
+            .then(() => {
+                log(`[Cache] Successfully promoted OID ${oidHex} to S3 cache.`);
+            })
+            .catch(err => {
+                log(
+                    `[Cache] ERROR during S3 upload finalization for OID ${oidHex}: ${err.message}`
+                );
+            })
+            .finally(() => {
+                // Remove it from the queue when done
+                const idx = s3global.queue.indexOf(uploadPromise);
+                if (idx !== -1) {
+                    s3global.queue.splice(idx, 1);
+                }
+            });
 
-        // await s3CacheState.s3UploadPromise
-        // log(`[Cache] Successfully promoted OID ${oidHex} to S3 cache.`);
+        // Add to queue
+        s3global.queue.push(uploadPromise);
 
-        s3CacheState.s3UploadPromise.then(() => {
-            log(`[Cache] Successfully promoted OID ${oidHex} to S3 cache.`);
-        }).catch(err => {
-            log(`[Cache] ERROR during S3 upload finalization for OID ${oidHex}: ${err.message}`);
-        });
+        // If too many uploads are in-flight, wait for at least one to finish
+        if (s3global.queue.length >= s3global.maxConcurrent) {
+            console.log(`[Cache] Reached max concurrent S3 uploads (${s3global.maxConcurrent}). Waiting for one to complete...`);
+            await Promise.race(s3global.queue);
+        }
 
         s3CacheState.s3UploadPromise = null;
     }
