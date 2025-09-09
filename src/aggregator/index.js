@@ -663,7 +663,7 @@ async function handleClientConnection(ws, req) {
                 for await (const chunk of nodeStream) {
                     // Promote if needed
                     await Promise.all([
-                        promoteFsCacheIfNeeded(fsCacheState, chunk),
+                        //promoteFsCacheIfNeeded(fsCacheState, chunk),
                         promoteS3CacheIfNeeded(s3CacheState, chunk)
                     ]);
 
