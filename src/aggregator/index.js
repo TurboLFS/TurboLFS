@@ -3,8 +3,9 @@ const fsPromises = require('fs/promises');
 const fs = require('fs');
 const path = require('path');
 const { Readable, PassThrough } = require('stream');
-const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, GetObjectCommand, ListObjectsV2Command, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { Upload } = require('@aws-sdk/lib-storage');
+const pLimit = require('p-limit');
 
 let CACHE_SOURCES;
 const SUPPORTED_PROTOCOL_VERSION_BY_SERVER = 1;
@@ -55,6 +56,166 @@ const secureResolvePath = (base, oid, structured) => {
     return normalized;
 };
 
+// Temporary file naming helper to ensure uniqueness across processes and functions
+function makeTempCachePath(finalCachePath, func) {
+    return `${finalCachePath}.${process.pid}.${func.name}.tmp`;
+}
+
+/**
+ * Lists objects from an S3 bucket, sorts them by size, and pre-downloads the smallest
+ * files up to a specified total size limit into a local filesystem cache.
+ *
+ * @param {object} s3Source - The S3 source configuration object from CACHE_SOURCES.
+ * @param {object} fsCacheSource - The filesystem cache destination object from CACHE_SOURCES.
+ * @param {number} [maxTotalSizeBytes=1073741824] - The maximum total size of files to download (defaults to 1 GB).
+ * @param {number} [concurrency=10] - The number of files to download in parallel.
+ */
+async function preDownloadSmallFilesFromS3(s3Source, fsCacheSource, maxTotalSizeBytes = 1 * 1024 * 1024 * 1024, concurrency = 10) {
+    if (!s3Source || !s3Source.s3 || !s3Source.s3.client) {
+        log('[Pre-Download] Invalid S3 source configuration provided.');
+        return;
+    }
+    if (!fsCacheSource || !fsCacheSource.url.startsWith('file://')) {
+        log('[Pre-Download] Invalid or non-filesystem cache destination provided.');
+        return;
+    }
+
+    const s3Client = s3Source.s3.client;
+    const bucketName = s3Source.s3.bucket;
+    const s3Prefix = s3Source.s3.prefix || '';
+    const localBasePath = fsCacheSource.url.slice(7);
+    const useStructuredPath = fsCacheSource.structuredPath;
+
+    log(`[Pre-Download] Starting pre-download from S3 bucket '${bucketName}' to '${localBasePath}'.`);
+    log(`[Pre-Download] Max cache size: ${(maxTotalSizeBytes / (1024 * 1024)).toFixed(2)} MB, Concurrency: ${concurrency}.`);
+
+    // Step 1: List all objects from S3, handling pagination
+    let allObjects = [];
+    try {
+        let isTruncated = true;
+        let continuationToken = undefined;
+        log(`[Pre-Download] Listing objects from s3://${bucketName}/${s3Prefix}...`);
+
+        while (isTruncated) {
+            const command = new ListObjectsV2Command({
+                Bucket: bucketName,
+                Prefix: s3Prefix,
+                ContinuationToken: continuationToken,
+            });
+            const response = await s3Client.send(command);
+            if (response.Contents) {
+                // Filter out any "directory" objects by ensuring they have a size > 0
+                const files = response.Contents.filter(obj => obj.Size > 0);
+                allObjects.push(...files);
+            }
+            isTruncated = response.IsTruncated;
+            continuationToken = response.NextContinuationToken;
+        }
+        log(`[Pre-Download] Found ${allObjects.length} total objects in S3.`);
+    } catch (err) {
+        log(`[Pre-Download] ERROR: Failed to list objects from S3: ${err.message}`);
+        return; // Cannot proceed
+    }
+
+    // Step 2: Sort objects by size (smallest first)
+    allObjects.sort((a, b) => a.Size - b.Size);
+
+    // Step 3: Select objects to download up to the max size limit
+    const objectsToDownload = [];
+    let currentTotalSize = 0;
+    for (const obj of allObjects) {
+        if (currentTotalSize + obj.Size <= maxTotalSizeBytes) {
+            objectsToDownload.push(obj);
+            currentTotalSize += obj.Size;
+        } else {
+            break; // Stop once the next file would exceed the limit
+        }
+    }
+
+    if (objectsToDownload.length === 0) {
+        log('[Pre-Download] No objects to download.');
+        return;
+    }
+
+    log(`[Pre-Download] Selected ${objectsToDownload.length} smallest objects, totaling ${(currentTotalSize / (1024 * 1024)).toFixed(2)} MB, for download.`);
+
+    // Step 4: Download selected objects concurrently
+    const limit = pLimit(concurrency);
+    let downloadedCount = 0;
+    let failedCount = 0;
+    let skippedCount = 0;
+
+    const downloadPromises = objectsToDownload.map(s3Object => {
+        return limit(async () => {
+            // Assuming the OID is the file name (basename of the S3 key)
+            const oidHex = path.basename(s3Object.Key);
+
+            let finalCachePath;
+            try {
+                finalCachePath = secureResolvePath(localBasePath, oidHex, useStructuredPath);
+            } catch (pathErr) {
+                log(`[Pre-Download] ERROR: Skipping OID ${oidHex} due to invalid path: ${pathErr.message}`);
+                failedCount++;
+                return;
+            }
+
+            // Check if file already exists in the cache
+            try {
+                await fsPromises.access(finalCachePath, fs.constants.F_OK);
+                skippedCount++;
+                return; // Already cached
+            } catch (e) {
+                // File doesn't exist, so proceed to download
+            }
+
+            // Use an atomic write: download to a temp file, then rename
+            const tempCachePath = makeTempCachePath(finalCachePath, preDownloadSmallFilesFromS3);
+            let fileWriteStream;
+
+            try {
+                await fsPromises.mkdir(path.dirname(finalCachePath), { recursive: true });
+
+                const getObjectCommand = new GetObjectCommand({ Bucket: bucketName, Key: s3Object.Key });
+                const response = await s3Client.send(getObjectCommand);
+
+                fileWriteStream = fs.createWriteStream(tempCachePath);
+
+                // Pipe the S3 object stream to the local file stream
+                await new Promise((resolve, reject) => {
+                    response.Body.on('error', reject); // S3 read error
+                    fileWriteStream.on('error', reject); // Filesystem write error
+                    fileWriteStream.on('finish', resolve); // Write success
+                    response.Body.pipe(fileWriteStream);
+                });
+
+                // Atomically move the temp file to its final destination
+                await fsPromises.rename(tempCachePath, finalCachePath);
+                downloadedCount++;
+                if (downloadedCount > 0 && downloadedCount % 100 === 0) {
+                    log(`[Pre-Download] Progress: Downloaded ${downloadedCount} / ${objectsToDownload.length - skippedCount} files.`);
+                }
+            } catch (downloadErr) {
+                log(`[Pre-Download] ERROR: Failed to download OID ${oidHex}: ${downloadErr.message}`);
+                failedCount++;
+                // Cleanup the failed temporary file
+                if (fileWriteStream) fileWriteStream.destroy();
+                try {
+                    await fsPromises.unlink(tempCachePath);
+                } catch (cleanupErr) {
+                    if (cleanupErr.code !== 'ENOENT') {
+                        log(`[Pre-Download] ERROR: Failed to clean up temp file ${tempCachePath}: ${cleanupErr.message}`);
+                    }
+                }
+            }
+        });
+    });
+
+    await Promise.all(downloadPromises);
+
+    log('[Pre-Download] Finished.');
+    log(`[Pre-Download] Summary: Successfully downloaded ${downloadedCount} new files. Failed: ${failedCount}. Skipped (already cached): ${skippedCount}.`);
+}
+
 async function setupFsCachePromotion(streamDetails, oidHex) {
     let fileWriteStream = null;
     let tempCachePath = null;
@@ -69,7 +230,7 @@ async function setupFsCachePromotion(streamDetails, oidHex) {
         try {
             finalCachePath = secureResolvePath(localBasePath, oidHex, localCacheSource.structuredPath);
             // Use a temporary file to ensure atomic write. Suffix with PID for multi-process safety.
-            tempCachePath = `${finalCachePath}.${process.pid}.tmp`;
+            tempCachePath = makeTempCachePath(finalCachePath, setupFsCachePromotion);
 
             // Ensure the target directory exists (e.g., /path/to/cache/aa/bb/)
             await fsPromises.mkdir(path.dirname(finalCachePath), { recursive: true });
@@ -664,6 +825,17 @@ function mainServer(
     if (CACHE_SOURCES.length === 0) {
         console.error('No cache sources configured. Please provide --objects-dir and/or --objects-repo.');
         return false;
+    }
+
+    const s3DataSource = CACHE_SOURCES.find(s => s.s3);
+    const fsCacheDestination = CACHE_SOURCES.find(s => s.url.startsWith('file://'));
+
+    if (s3DataSource && fsCacheDestination) {
+        log("Initiating pre-download of small files from S3 to warm up the cache...");
+        // Run in the background; don't block server startup.
+        // Errors will be logged internally by the function.
+        preDownloadSmallFilesFromS3(s3DataSource, fsCacheDestination)
+            .catch(err => log(`[Pre-Download] A critical unexpected error occurred: ${err.message}`));
     }
 
     const wss = new WebSocket.Server({ port: parseInt(portArg) });
