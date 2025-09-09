@@ -5,7 +5,7 @@ const path = require('path');
 const { Readable, PassThrough } = require('stream');
 const { S3Client, ListObjectsV2Command, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { Upload } = require('@aws-sdk/lib-storage');
-const pLimit = require('p-limit');
+const { limitFunction } = require('p-limit');
 
 let CACHE_SOURCES;
 const SUPPORTED_PROTOCOL_VERSION_BY_SERVER = 1;
@@ -140,7 +140,7 @@ async function preDownloadSmallFilesFromS3(s3Source, fsCacheSource, maxTotalSize
     log(`[Pre-Download] Selected ${objectsToDownload.length} smallest objects, totaling ${(currentTotalSize / (1024 * 1024)).toFixed(2)} MB, for download.`);
 
     // Step 4: Download selected objects concurrently
-    const limit = pLimit(concurrency);
+    const limit = limitFunction(concurrency);
     let downloadedCount = 0;
     let failedCount = 0;
     let skippedCount = 0;
