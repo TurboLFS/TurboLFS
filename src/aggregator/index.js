@@ -350,15 +350,7 @@ async function fetchStreamAndSizeFromSources(filenameOid, sizeBigint) {
             } else if (source.s3) {
                 log(`Attempting to fetch LFS object ${filenameOid} from S3 source: ${source.s3.bucket}`);
 
-                const s3Client = new S3Client({
-                    region: source.s3.region, // A region may be required depending on S3 provider
-                    endpoint: source.url, // Use the top-level URL from config as the endpoint
-                    credentials: {
-                        accessKeyId: source.s3.accessKeyId,
-                        secretAccessKey: source.s3.secretAccessKey,
-                    },
-                    forcePathStyle: !!source.url, // Required for most S3-compatible services
-                });
+                const s3Client = source.s3.client;
 
                 const s3Key = unsafeResolvePath(source.s3.prefix || '', filenameOid, structured);
 
@@ -626,6 +618,18 @@ function mainServer(
                 region: s3RegionArg,
             }
         });
+
+        const client = new S3Client({
+            region: source.s3.region, // A region may be required depending on S3 provider
+            endpoint: source.url, // Use the top-level URL from config as the endpoint
+            credentials: {
+                accessKeyId: source.s3.accessKeyId,
+                secretAccessKey: source.s3.secretAccessKey,
+            },
+            forcePathStyle: !!source.url, // Required for most S3-compatible services
+        });
+        CACHE_SOURCES[CACHE_SOURCES.length - 1].s3.client = client; // Attach the client for later use
+
         log(`Adding S3 cache source: ${s3EndpointArg} (structured: false, auth: ${!!(s3AccessKeyArg && s3SecretKeyArg)})`);
     }
 
