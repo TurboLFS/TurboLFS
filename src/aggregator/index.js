@@ -215,7 +215,7 @@ async function promoteS3CacheIfNeeded(s3CacheState, chunk) {
     }
 }
 
-async function commitS3CacheIfNeeded(s3CacheState, idHex) {
+async function commitS3CacheIfNeeded(s3CacheState, oidHex) {
     if (s3CacheState.s3UploadPromise) {
         if (s3CacheState.s3WriteStream && !s3CacheState.s3WriteStream.destroyed) {
             s3CacheState.s3WriteStream.end(); // Signal the end of the stream
