@@ -351,6 +351,8 @@ function initNetworking(wsUrl) {
     });
     state.wsClient = client;
 
+    let pingState = { lastPong: Date.now() };
+
     client.on('open', () => {
         log(`Connected to WebSocket server: ${wsUrl}`);
         
@@ -361,7 +363,29 @@ function initNetworking(wsUrl) {
             state.reconnectTimerId = null;
         }
         // Server should send protocol version first. Agent waits for it.
+        client.ping();
     });
+
+    client.on('pong', async () => {
+        pingState.lastPong = Date.now();
+
+        // Schedule next ping in 10 seconds
+        await new Promise(resolve => setTimeout(resolve, 10000));
+
+        if (client.readyState === WebSocket.OPEN) {
+            client.ping();
+            debugLog("Sent ping to server.");
+        }
+    });
+
+    const intervalId = setInterval(() => {
+        if (Date.now() - pingState.lastPong > 30000) { // 30 seconds without pong
+            log("No pong received from server in 30 seconds. Terminating connection.");
+            client.terminate(); // This will trigger 'close' event and reconnection logic
+            clearInterval(intervalId); // Stop this interval as connection is closed
+        }
+
+    }, 10000); // Check every 10 seconds
 
     client.on('message', async (data) => {
         if (!Buffer.isBuffer(data)) {
