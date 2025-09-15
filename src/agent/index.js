@@ -351,41 +351,44 @@ function initNetworking(wsUrl) {
     });
     state.wsClient = client;
 
-    let pingState = { lastPong: Date.now() };
+    let heartbeatInterval;
+    let isAlive = true;
+
+    function heartbeat() {
+        // 1. If the server didn't respond to the last ping, the connection is dead.
+        if (isAlive === false) {
+            log("No pong received from server since last ping. Terminating connection.");
+            clearInterval(heartbeatInterval); // Clean up immediately
+            return client.terminate();
+        }
+
+        // 2. Assume the connection is dead until a pong proves otherwise.
+        isAlive = false;
+
+        // 3. Send the ping. The pong handler will set isAlive back to true.
+        client.ping();
+        debugLog("Sent ping to server.");
+    }
+
+    client.on('pong', () => {
+        // The server is alive.
+        isAlive = true;
+        debugLog("Received pong from server.");
+    });
 
     client.on('open', () => {
         log(`Connected to WebSocket server: ${wsUrl}`);
-        
-        // --- Reset reconnection logic on a successful connection ---
-        state.reconnectDelay = 1000; // Reset delay to its initial value
+        state.reconnectDelay = 1000;
         if (state.reconnectTimerId) {
-            clearTimeout(state.reconnectTimerId); // Cancel any scheduled reconnect
+            clearTimeout(state.reconnectTimerId);
             state.reconnectTimerId = null;
         }
-        // Server should send protocol version first. Agent waits for it.
-        client.ping();
+
+        // Start the heartbeat interval. Run it every 15 seconds.
+        // It will terminate if a pong isn't received within that 15-second window.
+        isAlive = true; // Start with a clean slate
+        heartbeatInterval = setInterval(heartbeat, 15000);
     });
-
-    client.on('pong', async () => {
-        pingState.lastPong = Date.now();
-
-        // Schedule next ping in 10 seconds
-        await new Promise(resolve => setTimeout(resolve, 10000));
-
-        if (client.readyState === WebSocket.OPEN) {
-            client.ping();
-            debugLog("Sent ping to server.");
-        }
-    });
-
-    const intervalId = setInterval(() => {
-        if (Date.now() - pingState.lastPong > 30000) { // 30 seconds without pong
-            log("No pong received from server in 30 seconds. Terminating connection.");
-            client.terminate(); // This will trigger 'close' event and reconnection logic
-            clearInterval(intervalId); // Stop this interval as connection is closed
-        }
-
-    }, 10000); // Check every 10 seconds
 
     client.on('message', async (data) => {
         if (!Buffer.isBuffer(data)) {
@@ -438,6 +441,8 @@ function initNetworking(wsUrl) {
     });
 
     client.on('close', (code, reason) => {
+        clearInterval(heartbeatInterval);
+
         const reasonStr = reason ? reason.toString() : 'No reason provided';
         log(`Disconnected from WebSocket server. Code: ${code}, Reason: ${reasonStr}`);
         state.agentReadyForLFS = false;
